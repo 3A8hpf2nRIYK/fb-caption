@@ -1,3 +1,3 @@
-name = "fb-caption"
+name = "fb-caption-bot"
 main = "src/index.js"
 compatibility_date = "2026-11-01"
