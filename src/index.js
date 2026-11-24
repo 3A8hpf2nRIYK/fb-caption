@@ -34,32 +34,72 @@ function ambilMeta(html, properti) {
   return null;
 }
 
+// Daftar semua property/name dari meta tag (untuk debug).
+function daftarMeta(html) {
+  const re = /<meta\s+[^>]*>/gi;
+  const hasil = [];
+  let m;
+  while ((m = re.exec(html)) !== null && hasil.length < 30) {
+    const prop = m[0].match(/(?:property|name)=["']([^"']+)["']/i);
+    if (prop && !hasil.includes(prop[1])) hasil.push(prop[1]);
+  }
+  return hasil;
+}
+
 // Cari tanggal post dari berbagai sumber di HTML.
 // Urutan: meta article:published_time -> JSON-LD datePublished ->
-// timestamp unix di data embed (creation_time / publish_time).
-// Kembalikan string ISO atau null kalau tidak ditemukan.
-function cariTanggal(html) {
-  const meta = ambilMeta(html, [
+// timestamp unix di data embed (creation_time / publish_time / ...).
+// Catatan: JSON embed Facebook memakai quote yang di-escape (\"key\"),
+// jadi pola timestamp dibuat toleran terhadap backslash.
+function cariTanggalDetail(html) {
+  const checks = { meta: null, jsonLd: null, timestamp: null };
+
+  checks.meta = ambilMeta(html, [
     "article:published_time",
     "og:published_time",
     "article:modified_time",
   ]);
-  if (meta) return meta;
+  if (checks.meta) return { nilai: checks.meta, sumber: "meta", checks };
 
   const ld = html.match(/"date(?:Published|Created)"\s*:\s*"([^"]+)"/i);
-  if (ld) return ld[1];
+  if (ld) {
+    checks.jsonLd = ld[1];
+    return { nilai: ld[1], sumber: "json-ld", checks };
+  }
 
-  const ts = html.match(/"(?:creation_time|publish_time|published_time)"\s*:\s*"?(\d{10,13})"?/i);
+  const ts = html.match(
+    /["\\]*(?:creation_time|publish_time|published_time|created_time)["\\]*\s*:\s*["\\]*(\d{10,13})/i
+  );
   if (ts) {
     const digit = ts[1];
     const ms = digit.length === 13 ? Number(digit) : Number(digit) * 1000;
     // Sanity check: antara 2000-01-01 dan 2100-01-01
-    if (ms > 946684800000 && ms < 4102444800000) return new Date(ms).toISOString();
+    if (ms > 946684800000 && ms < 4102444800000) {
+      checks.timestamp = digit;
+      return { nilai: new Date(ms).toISOString(), sumber: "timestamp", checks };
+    }
+    checks.timestamp = `${digit} (di luar rentang)`;
   }
-  return null;
+  return { nilai: null, sumber: null, checks };
 }
 
-// "18 September 2025, 19:30 WIB"
+// Pindai semua field yang namanya mengandung time/date dan nilainya
+// berbentuk tanggal (ISO atau unix 10/13 digit). Untuk debug: membuktikan
+// apakah tanggal post ada di HTML yang diterima Worker atau tidak.
+function cariKandidatTanggal(html) {
+  const re =
+    /["\\]*([A-Za-z0-9_]*?(?:time|date)[A-Za-z0-9_]*?)["\\]*\s*:\s*["\\]*(\d{4}-\d{2}-\d{2}[^"\\,}\]]{0,20}|\d{10,13}(?:\.\d+)?)/gi;
+  const hasil = new Map();
+  let m;
+  let n = 0;
+  while ((m = re.exec(html)) !== null && hasil.size < 8 && n++ < 5000) {
+    const kunci = m[1].toLowerCase();
+    if (!hasil.has(kunci)) hasil.set(kunci, m[2]);
+  }
+  return [...hasil.entries()];
+}
+
+// "18 September 2025 pukul 19.30 WIB"
 function formatTanggal(nilai) {
   const d = new Date(nilai);
   if (Number.isNaN(d.getTime())) return null;
@@ -92,13 +132,50 @@ async function ambilInfoPost(url) {
   const html = await res.text();
   const caption =
     ambilMeta(html, ["og:description"]) || ambilMeta(html, ["og:title"]) || "";
-  const tanggalMentah = cariTanggal(html);
+  const tanggal = cariTanggalDetail(html);
 
   return {
     caption,
-    tanggal: tanggalMentah ? formatTanggal(tanggalMentah) : null,
-    tanggalFile: tanggalMentah ? tanggalUntukNamaFile(tanggalMentah) : null,
+    tanggal: tanggal.nilai ? formatTanggal(tanggal.nilai) : null,
+    tanggalFile: tanggal.nilai ? tanggalUntukNamaFile(tanggal.nilai) : null,
+    debug: {
+      finalUrl: res.url,
+      htmlSize: html.length,
+      metaProps: daftarMeta(html),
+      checks: tanggal.checks,
+      kandidat: cariKandidatTanggal(html),
+    },
   };
+}
+
+function formatKandidat([kunci, nilai]) {
+  let ket = nilai;
+  if (/^\d{10}$/.test(nilai)) {
+    ket = `${nilai} (${formatTanggal(Number(nilai) * 1000)})`;
+  } else if (/^\d{13}(\.\d+)?$/.test(nilai)) {
+    ket = `${nilai} (${formatTanggal(Number(nilai))})`;
+  }
+  return `• ${kunci} = ${ket}`;
+}
+
+function buatPesanDebug(info) {
+  const d = info.debug;
+  const url = d.finalUrl.length > 200 ? d.finalUrl.slice(0, 200) + "…" : d.finalUrl;
+  let teks =
+    `🔍 Debug\n` +
+    `URL akhir: ${url}\n` +
+    `HTML: ${d.htmlSize.toLocaleString("id-ID")} byte\n` +
+    `Meta: ${d.metaProps.join(", ") || "-"}\n` +
+    `\nTanggal:\n` +
+    `• meta: ${d.checks.meta || "tidak ada"}\n` +
+    `• JSON-LD: ${d.checks.jsonLd || "tidak ada"}\n` +
+    `• timestamp: ${d.checks.timestamp || "tidak ada"}`;
+  if (d.kandidat.length) {
+    teks += `\n\nKandidat tanggal di HTML:\n${d.kandidat.map(formatKandidat).join("\n")}`;
+  } else {
+    teks += `\n\nKandidat tanggal di HTML: tidak ada`;
+  }
+  return teks;
 }
 
 async function kirimPesan(env, chatId, teks) {
@@ -129,6 +206,10 @@ export default {
       return new Response("OK");
     }
 
+    // Mode debug: kirim link + kata "debug" untuk melihat data mentah
+    // yang diterima Worker (berguna kalau tanggal tidak muncul).
+    const debugMode = /debug/i.test(msg.text);
+
     try {
       const info = await ambilInfoPost(cocok[0]);
       if (!info.caption) {
@@ -143,6 +224,7 @@ export default {
         pesan += `\n\n📁 Nama file:\n${namaDenganTanggal}`;
         await kirimPesan(env, chatId, pesan);
       }
+      if (debugMode) await kirimPesan(env, chatId, buatPesanDebug(info));
     } catch (e) {
       await kirimPesan(env, chatId, `Gagal: ${e.message}`);
     }

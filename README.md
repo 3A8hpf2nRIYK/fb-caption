@@ -44,6 +44,20 @@ sebagian besar link Facebook, baris tanggal tidak akan muncul. Tanggal yang
 dijamin akurat hanya bisa didapat lewat Facebook Graph API dengan access
 token.
 
+## Mode debug
+
+Kirim link + kata `debug` untuk melihat data mentah yang diterima Worker:
+
+```
+https://www.facebook.com/.../videos/123/ debug
+```
+
+Bot membalas pesan biasa, lalu pesan debug berisi URL akhir setelah
+redirect, ukuran HTML, daftar meta tag, hasil tiap sumber tanggal, dan
+kandidat field tanggal yang ada di HTML. Berguna untuk memastikan apakah
+tanggal post memang tidak tersedia untuk link tersebut, atau ada field
+tanggal yang belum dikenali bot.
+
 ## Deploy
 
 ```sh
