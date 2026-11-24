@@ -20,25 +20,85 @@ function bersihkanNama(teks, maks = 100) {
   return bersih || "video_facebook";
 }
 
-async function ambilCaption(url) {
+// Ambil isi <meta property="..."> pertama yang cocok (urutan atribut bebas).
+function ambilMeta(html, properti) {
+  const daftar = new Set(properti.map((p) => p.toLowerCase()));
+  const re = /<meta\s+[^>]*>/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const prop = m[0].match(/property=["']([^"']+)["']/i);
+    if (!prop || !daftar.has(prop[1].toLowerCase())) continue;
+    const content = m[0].match(/content=["']([^"']*)["']/i);
+    if (content) return decodeHtml(content[1]);
+  }
+  return null;
+}
+
+// Cari tanggal post dari berbagai sumber di HTML.
+// Urutan: meta article:published_time -> JSON-LD datePublished ->
+// timestamp unix di data embed (creation_time / publish_time).
+// Kembalikan string ISO atau null kalau tidak ditemukan.
+function cariTanggal(html) {
+  const meta = ambilMeta(html, [
+    "article:published_time",
+    "og:published_time",
+    "article:modified_time",
+  ]);
+  if (meta) return meta;
+
+  const ld = html.match(/"date(?:Published|Created)"\s*:\s*"([^"]+)"/i);
+  if (ld) return ld[1];
+
+  const ts = html.match(/"(?:creation_time|publish_time|published_time)"\s*:\s*"?(\d{10,13})"?/i);
+  if (ts) {
+    const digit = ts[1];
+    const ms = digit.length === 13 ? Number(digit) : Number(digit) * 1000;
+    // Sanity check: antara 2000-01-01 dan 2100-01-01
+    if (ms > 946684800000 && ms < 4102444800000) return new Date(ms).toISOString();
+  }
+  return null;
+}
+
+// "18 September 2025, 19:30 WIB"
+function formatTanggal(nilai) {
+  const d = new Date(nilai);
+  if (Number.isNaN(d.getTime())) return null;
+  return (
+    new Intl.DateTimeFormat("id-ID", {
+      timeZone: "Asia/Jakarta",
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(d) + " WIB"
+  );
+}
+
+// "2025-09-18" (WIB) untuk awalan nama file
+function tanggalUntukNamaFile(nilai) {
+  const d = new Date(nilai);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta" }).format(d);
+}
+
+async function ambilInfoPost(url) {
   const res = await fetch(url, {
     headers: { "User-Agent": "facebookexternalhit/1.1" },
     redirect: "follow",
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-  const og = {};
-  const rewriter = new HTMLRewriter().on("meta", {
-    element(el) {
-      const prop = el.getAttribute("property");
-      if (prop === "og:title" || prop === "og:description") {
-        og[prop] = el.getAttribute("content");
-      }
-    },
-  });
-  await rewriter.transform(res).text();
+  const html = await res.text();
+  const caption =
+    ambilMeta(html, ["og:description"]) || ambilMeta(html, ["og:title"]) || "";
+  const tanggalMentah = cariTanggal(html);
 
-  return decodeHtml(og["og:description"] || og["og:title"] || "");
+  return {
+    caption,
+    tanggal: tanggalMentah ? formatTanggal(tanggalMentah) : null,
+    tanggalFile: tanggalMentah ? tanggalUntukNamaFile(tanggalMentah) : null,
+  };
 }
 
 async function kirimPesan(env, chatId, teks) {
@@ -70,16 +130,18 @@ export default {
     }
 
     try {
-      const caption = await ambilCaption(cocok[0]);
-      if (!caption) {
+      const info = await ambilInfoPost(cocok[0]);
+      if (!info.caption) {
         await kirimPesan(env, chatId, "Caption tidak ditemukan (mungkin postingan tidak publik).");
       } else {
-        const namaFile = bersihkanNama(caption);
-        await kirimPesan(
-          env,
-          chatId,
-          `📝 Caption:\n${caption.slice(0, 3500)}\n\n📁 Nama file:\n${namaFile}`
-        );
+        const namaFile = bersihkanNama(info.caption);
+        const namaDenganTanggal = info.tanggalFile
+          ? `${info.tanggalFile}_${namaFile}`
+          : namaFile;
+        let pesan = `📝 Caption:\n${info.caption.slice(0, 3400)}`;
+        if (info.tanggal) pesan += `\n\n📅 Tanggal post:\n${info.tanggal}`;
+        pesan += `\n\n📁 Nama file:\n${namaDenganTanggal}`;
+        await kirimPesan(env, chatId, pesan);
       }
     } catch (e) {
       await kirimPesan(env, chatId, `Gagal: ${e.message}`);
